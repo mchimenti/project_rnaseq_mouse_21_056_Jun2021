@@ -257,7 +257,7 @@ res_F_sed5$gene_id <- row.names(res_F_sed5)
 res_F_sed5 <- left_join(as_tibble(res_F_sed5), as_tibble(anno_mm10), by = "gene_id")
 res_F_sed5
 
-res_F_sed7 <- get_res(ddsTxi_F, meta_col = "cond", cond1 = "sed7", cond2 = "ex", anno = anno_mm10)
+res_F_sed7 <- get_res(ddsTxi_F, meta_col = "cond", cond1 = "ex", cond2 = "sed7", anno = anno_mm10)
 res_F_sed7$gene_id <- row.names(res_F_sed7)
 res_F_sed7 <- left_join(as_tibble(res_F_sed7), as_tibble(anno_mm10), by = "gene_id")
 res_F_sed7
