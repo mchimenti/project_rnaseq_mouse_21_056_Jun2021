@@ -1,0 +1,505 @@
+---
+title: "Exercise and pain induction in a mouse model of pain; RNA-seq mouse GC"
+author: Michael Chimenti
+date:  07.26.21
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "~/collab_proj/sluka/project_rnaseq_mouse_21_056_Jun2021/")
+```
+
+## Introduction
+
+We have shown repeatedly that 8 weeks of exercise prior to induction of our pain model can prevent the onset of pain. We have shown that exercise can prevent pain through alterations at the muscle, dorsal root ganglia, and in the brain. However, we have only elucidated a few of these mechanisms and we wanted to use RNAseq to help us determine more possible mechanisms. The overall goal of this project is to determine how muscle pain alters the transcriptome in various tissue locations and how exercise alters the transcriptional response to the induction of chronic pain. First, we would like to compare transcriptional differences between pain free and in pain mice in order to determine how the transcriptome is altered after induction of the pain model. From our spreadsheet the pain free animals are listed as Sed + 7.2 and the in pain mice are listed as Sed + 5.0. Next, we would like to understand how 8 weeks of exercise performed prior to induction of the pain model alters the transcriptional response to prevent the onset of chronic pain. From our spreadsheet exercised animals are listed as Ex. Lastly, the pain model we use produces a sex dependent pain phenotype in which males and females demonstrate different severity of pain. Therefore, we would like to see if there are any differences in the transcriptome between males and females that could demonstrate differences in pain mechanisms or give us insight into what is driving the pain phenotype.
+
+Sed_72 = pain free animals (no pain induction)
+Sed_50 = "in pain" animals (pain induction)
+Ex = 8 weeks exercise + pain induction 
+
+Here, we wish to examine sex-specific differences in the response to pain induction.  We will take two approaches: 
+
+ - 1. Split the datasets by M/F and do pairwise testing (Wald test)
+ - 2. Keep the datasets together and create a 'grouped' factor (i.e., condition + sex) that can be tested for specific combinations of interest 
+ 
+Both approaches are valid, but approach 2 likely has higher power owing to retaining all samples in the experiment.  
+
+### Samples were prepared according to: 
+
+Illumina TruSeq mRNA_seq stranded 
+NovaSeq SP 200cycles (100PE)
+
+### Upstream processing and QC
+
+  - dirs:
+  -  config: /Dedicated/IIHG-argon/bcbio-1.2.4/galaxy
+  -  fastq: null
+  -  flowcell: null
+  -  galaxy: /Dedicated/IIHG-argon/bcbio-1.2.4/galaxy
+  -  work: /Shared/Bioinformatics/data/mchiment/sluka/project_rnaseq_mouse_21_056_Jun2021/to_merge-merged/work
+-  genome_build: mm10
+-  genome_resources:
+-    aliases:
+-      ensembl: mus_musculus_vep_99_GRCm38
+-      human: null
+-      snpeff: GRCm38.86
+-    rnaseq:
+-      dexseq: /Dedicated/IIHG-argon/bcbio-1.2.4/genomes/Mmusculus/mm10/rnaseq/ref-transcripts.dexseq.gff3
+-      gene_bed: /Dedicated/IIHG-argon/bcbio-1.2.4/genomes/Mmusculus/mm10/rnaseq/ref-transcripts.bed
+-      rRNA_fa: ../rnaseq/rRNA.fa
+-      transcripts: /Dedicated/IIHG-argon/bcbio-1.2.4/genomes/Mmusculus/mm10/rnaseq/ref-transcripts.gtf
+-      transcripts_mask: /Dedicated/IIHG-argon/bcbio-1.2.4/genomes/Mmusculus/mm10/rnaseq/ref-transcripts-mask.gtf
+
+
+### R packages we will use in this analysis
+
+```{r, imports, warnings=FALSE, message=FALSE, eval=TRUE}
+#negative binomial GLM and related
+library('DESeq2')
+library('calibrate')
+library('tximport')
+library('readr')
+#annotation
+library('biomaRt')
+library("AnnotationDbi")
+library("org.Mm.eg.db")
+#Exploratory analysis
+library('tidyverse')
+library('pcaExplorer')
+library('ggrepel')
+#pathway and gene clusters
+library('DEGreport')
+library('cowplot')
+
+
+setwd("~/collab_proj/sluka/project_rnaseq_mouse_21_056_Jun2021/")
+
+```
+
+```{r, function_defs, eval=TRUE, echo=FALSE}
+
+## Volcano Plot
+do_vol_plot <- function(df, sig=0.05, fc=0.5, size = 4, main=''){
+  
+  df_sig<- df %>% filter(padj < sig)
+  
+  ## genes with labels -- signficant,decreased expression and start with IGF
+  
+  df_label<- df %>% 
+              filter(padj < sig, abs(log2FoldChange) > fc)
+              #mutate(short_id = stringr::str_split(gene_id, "000000") %>% map_chr(.,2))
+  
+  
+  ## plot
+  
+  p <- ggplot(df, aes(log2FoldChange, -log10(padj)))  +
+      geom_point(size=0.8, color="black", alpha=.8) + 
+      geom_point(size=0.8, data=df_sig, aes(log2FoldChange, -log10(padj)), colour="red") +
+       geom_text_repel(size= size, 
+                    colour="black",
+                    segment.size=0.1, 
+                    nudge_x=0.06, 
+                    nudge_y=0.06, 
+                    data=df_label,
+                    aes(log2FoldChange, -log10(padj), label=gene_name), 
+                    max.iter= 200, 
+                    max.overlaps = 20,
+                    point.padding = 0.15, 
+                    segment.alpha = 1, 
+                    box.padding=.15,
+                    min.segment.length = unit(0.15, 'lines'),size=2.5) +
+    theme(
+      axis.text.x = element_text(size=12),
+      axis.text.y = element_text(size=12),
+      axis.title.x = element_text(size=14, margin = margin(t = 10, r = 0, b = 10, l = 0)),
+      axis.title.y = element_text(size=14, margin = margin(t = 0, r = 10, b = 0, l = 10)),
+      plot.margin =unit(c(.5,.5,.5,.5),"cm"),
+      plot.title = element_text(size = 11)
+    )
+  p <- p + ggtitle(main)
+  return (p)
+}
+
+get_res_tib_anno <- function(dds, meta_col, cond1, cond2, anno, pval = 0.05){
+ res <- results(dds, contrast = c(meta_col,cond1,cond2))
+ res <- na.omit(res)
+ res_sig <- res[res$padj < pval & res$baseMean > 5.0,]
+ res_ord <- res_sig[order(res_sig$padj),]
+ res_ord$ENSEMBL <- row.names(res_ord)
+ res_ord <- left_join(as_tibble(res_ord), as_tibble(anno), by = "ENSEMBL")
+ return(res_ord)
+}
+
+#function to quickly get sorted results 
+get_res <- function(dds, meta_col, cond1, cond2, anno, pval = 0.05){
+  res <- results(dds, contrast = c(meta_col,cond1,cond2))
+  res <- na.omit(res)
+  res_sig <- res[res$padj < pval,]
+  res_ord <- res_sig[order(res_sig$padj),]
+  return(res_ord)
+}
+
+get_res_iPG <- function(dds, meta_col, cond1, cond2, anno, pval = 0.05){
+  res <- results(dds, contrast = c(meta_col,cond1,cond2))
+  res <- na.omit(res)
+  res <- res[abs(res$log2FoldChange) < 10, ]
+  res$gene_id <- row.names(res)
+  res <- left_join(as_tibble(res), as_tibble(anno), by = "gene_id")
+  write.table(res, file = paste0("All_Genes_Tab_", cond1, "_", cond2, ".txt"), sep = '\t', 
+              row.names=FALSE)}
+
+```
+
+
+### Importing the data and converting to counts for DESeq2
+
+The metadata table looks like this: 
+```{r, import_meta}
+samples <- read.table("samples.csv", sep=',', header=TRUE)
+head(samples, 10)
+```
+
+### Importing salmon TPMs and creating DESeq2 object 
+
+```{r, import_salmon}
+
+rownames(samples) <- samples$sample
+#samples$batch <- as.factor(samples$batch)
+
+#samples %>% kable() %>% kable_styling()
+
+files <- file.path(getwd(), samples$sample, 'salmon', 'quant.sf')
+names(files) <- samples$sample
+
+tx2gene <- read_csv(file.path(getwd(), "tx2gene.csv"), col_names = FALSE)
+
+txi <- tximport(files, type="salmon", tx2gene=tx2gene)
+
+ddsTxi <- DESeqDataSetFromTximport(txi,
+                                   colData = samples,
+                                   design = ~ sex + tissue_batch + cond)
+
+#ddsTxi <- ddsTxi[ rowSums(counts(ddsTxi)) > 10, ]   #row Sum filter
+ddsTxi <- ddsTxi[ rowSums(counts(ddsTxi) > 10) >= 15, ]  #at least 5 counts at 15 or more samples; this mostly stops the "dropout" problem 
+ddsTxi <- DESeq(ddsTxi)
+
+
+```
+
+
+### Sex differences in gene response 
+
+- Sed_72 = pain free animals (no pain induction)
+- Sed_50 = "in pain" animals (pain induction)
+- Ex = 8 weeks exercise + pain induction 
+
+**We are interested in pain vs pain+exercise, no-pain vs pain+exercise, and pain vs no-pain. **
+
+- res_sed5_ex = in pain vs exercise + in pain
+- res_sed7_ex = no pain vs exercise + in pain 
+- res_sed5_sed7 = in pain vs no pain 
+
+#### First, we will split the datasets by sex and compute DEGs: 
+
+```{r, sex_diff}
+
+ddsTxi_d <- ddsTxi[,ddsTxi$sample!="GM_45"]
+ddsTxi_F <- ddsTxi_d[, ddsTxi_d$sex == "F"]
+ddsTxi_M <- ddsTxi_d[, ddsTxi_d$sex == "M"]
+
+design(ddsTxi_F) <- ~ tissue_batch + cond
+design(ddsTxi_M) <- ~ tissue_batch + cond
+
+ddsTxi_F <- DESeq(ddsTxi_F)
+ddsTxi_M <- DESeq(ddsTxi_M)
+```
+
+
+#### Males only DEG results 
+
+```{r, degs_M, dpi=200, fig.height=9,fig.width=9}
+
+anno_mm10 <- readRDS("~/Desktop/anno_mm10.rds")
+
+## Male pain vs exercise+pain 
+res_M_sed5 <- get_res(dds = ddsTxi, meta_col = "cond", cond1 = "sed5", cond2 = "ex", anno = anno_mm10)
+res_M_sed5$gene_id <- row.names(res_M_sed5)
+res_M_sed5 <- left_join(as_tibble(res_M_sed5), as_tibble(anno_mm10), by = "gene_id")
+res_M_sed5
+
+## Male normal vs exercise+pain 
+res_M_sed7 <- get_res(dds = ddsTxi_M, meta_col = "cond", cond1 = "sed7", cond2 = "ex", anno = anno_mm10)
+res_M_sed7$gene_id <- row.names(res_M_sed7)
+res_M_sed7 <- left_join(as_tibble(res_M_sed7), as_tibble(anno_mm10), by = "gene_id")
+res_M_sed7
+
+## Male pain vs pain-free 
+res_M_sed5_sed7 <- get_res(dds = ddsTxi_M, meta_col = "cond", cond1 = "sed5", cond2 = "sed7", anno = anno_mm10)
+res_M_sed5_sed7$gene_id <- row.names(res_M_sed5_sed7)
+res_M_sed5_sed7 <- left_join(as_tibble(res_M_sed5_sed7), as_tibble(anno_mm10), by = "gene_id") 
+res_M_sed5_sed7
+
+do_vol_plot(res_M_sed5, sig = 0.001, fc = 0.5, main = "Pain vs Exercise+Pain, Males Only")
+do_vol_plot(res_M_sed7, sig = 0.001, fc = 1.0, size = 3, main = "Pain-free vs Exercise+pain, Males Only")
+do_vol_plot(res_M_sed5_sed7, sig = 0.001, fc = 1.0, size = 4, main = "Pain vs Pain-Free, Males Only")
+
+```
+
+#### Females Only DEG results 
+
+```{r, degs_F, dpi=200, fig.height=9,fig.width=9}
+
+res_F_sed5 <- get_res(ddsTxi_F, meta_col = "cond", cond1 = "sed5", cond2 = "ex", anno = anno_mm10)
+res_F_sed5$gene_id <- row.names(res_F_sed5)
+res_F_sed5 <- left_join(as_tibble(res_F_sed5), as_tibble(anno_mm10), by = "gene_id")
+res_F_sed5
+
+res_F_sed7 <- get_res(ddsTxi_F, meta_col = "cond", cond1 = "sed7", cond2 = "ex", anno = anno_mm10)
+res_F_sed7$gene_id <- row.names(res_F_sed7)
+res_F_sed7 <- left_join(as_tibble(res_F_sed7), as_tibble(anno_mm10), by = "gene_id")
+res_F_sed7
+
+res_F_sed5_sed7 <- get_res(dds = ddsTxi_F, meta_col = "cond", cond1 = "sed5", cond2 = "sed7", anno = anno_mm10)
+res_F_sed5_sed7$gene_id <- row.names(res_F_sed5_sed7)
+res_F_sed5_sed7 <- left_join(as_tibble(res_F_sed5_sed7), as_tibble(anno_mm10), by = "gene_id") 
+res_F_sed5_sed7
+
+p1 <- do_vol_plot(res_F_sed5, sig = 0.001, fc = 1.0, size = 3, main = "Pain vs Pain+Exercise, Females Only, red = adj-p < 0.001")
+p2 <- do_vol_plot(res_F_sed7, sig = 0.001, fc = 1.0, size = 4, main = "Pain-Free vs Pain+Exercise, Females Only, red=adj-p < 0.001")
+p3 <- do_vol_plot(res_F_sed5_sed7, sig = 0.000000001, fc = 2.5, size = 3, main = "Pain vs Pain-Free, Females Only, red = adj-p < 1e-9 ")
+
+```
+
+
+
+#### Venn diagram of split M/F analysis 
+
+```{r, VENN}
+library(Vennerable)
+v <- Venn(list(PainFree_v_PainEx_Male = res_M_sed7$gene_id, 
+                           PainFree_v_PainEx_Female = res_F_sed7$gene_id))
+                           
+
+plot(v, doWeights = TRUE)
+
+v2 <- Venn(list(Pain_v_PainEx_Male = res_M_sed5$gene_id, 
+                           Pain_v_PainEx_Female = res_F_sed5$gene_id))
+                           
+
+plot(v2, doWeights = TRUE)
+
+v3 <- Venn(list(PainFree_vs_Pain_Male = res_M_sed5_sed7$gene_id,
+                           PainFree_vs_Pain_Female = res_F_sed5_sed7$gene_id))
+
+
+plot(v3, doWeights = TRUE)
+
+```
+
+
+
+#### Second we will create a grouped factor to look at pairwise sex/condition interactions 
+```{r, grouped}
+ddsTxi_d$group <- as.factor(paste0(ddsTxi_d$cond, ddsTxi_d$sex))
+design(ddsTxi_d) <- ~ tissue_batch + group
+ddsTxi_d <- DESeq(ddsTxi_d)
+```
+
+#### Get gene sets for heatmap
+
+```{r}
+m_f_common <- v3@IntersectionSets$`11`
+f_unique <- v3@IntersectionSets$`01`
+
+top20_common <- res_F_sed5_sed7 %>% filter(gene_id %in% m_f_common) %>% head(20)
+top20_fem_uniq <- res_F_sed5_sed7 %>% filter(gene_id %in% f_unique) %>% head(20)
+
+vstTxi <- vst(ddsTxi_d)
+vst_tab <- as.data.frame(assay(vstTxi))
+counts_mat_common <- as.matrix(vst_tab[top20_common$gene_id,])
+counts_mat_femaleuniq <- as.matrix(vst_tab[top20_fem_uniq$gene_id,])
+
+```
+
+
+#### Heatmaps 
+
+```{r, plot_combo_heatmap, dpi = 300, fig.width = 8, fig.height=8}
+library(pheatmap)
+library(RColorBrewer)
+
+## Setup quantile breaks
+quantile_breaks <- function(xs, n = 10) {
+  breaks <- quantile(xs, probs = seq(0, 1, length.out = n))
+  breaks[!duplicated(breaks)]
+}
+
+mat_breaks <- quantile_breaks(as.matrix(counts_mat_common), n = 13)  ## quantile breaks
+
+annot <- colData(vstTxi)
+anno_df <- as.data.frame(annot, row.names = colnames(vstTxi))
+labels <- top20_common$gene_name
+
+p <- pheatmap(counts_mat_common[,c(1,3,4,7,8,10,11,12,14,15,17,19,20,22,23)], 
+         labels_row = labels,
+         #breaks = mat_breaks,
+         annotation_col = anno_df[,c("cond","sex")],
+         #annotation_row = row_anno,
+         #annotation_colors = mat_colors,
+         cluster_rows = FALSE,
+         cluster_cols = TRUE,
+         show_rownames = TRUE,
+         show_colnames = TRUE,
+         color = colorRampPalette(rev(brewer.pal(n=10,name = "RdBu")))(15),
+         fontsize_row = 8,
+         scale = "row"
+         )
+
+
+ggsave(file = "~/collab_proj/sluka/project_rnaseq_mouse_21_056_Jun2021/heatmap_top20common_pH5_vs_pH7_NOEX.pdf", plot=p, dev = "pdf")
+
+labels2 <- top20_fem_uniq$gene_name
+p2 <- pheatmap(counts_mat_femaleuniq[,c(1,3,4,7,8,10,11,12,14,15,17,19,20,22,23)], 
+         labels_row = labels2,
+         #breaks = mat_breaks,
+         annotation_col = anno_df[,c("cond","sex")],
+         #annotation_row = row_anno,
+         #annotation_colors = mat_colors,
+         cluster_rows = FALSE,
+         cluster_cols = TRUE,
+         show_rownames = TRUE,
+         show_colnames = TRUE,
+         color = colorRampPalette(rev(brewer.pal(n=10,name = "RdBu")))(15),
+         fontsize_row = 8,
+         scale = "row"
+         )
+
+ggsave(file = "~/collab_proj/sluka/project_rnaseq_mouse_21_056_Jun2021/heatmap_top20femaleUNIQUE_pH5_vs_pH7_NOEX.pdf", plot=p2, dev = "pdf")
+
+```
+
+
+
+
+
+
+#### Male pairwise comparisons 
+
+```{r, get_grouped_res_M, dpi=200, fig.height=9,fig.width=9}
+
+
+### Males only Pain vs Pain + Exercise 
+res_M_sed5_full <- get_res(dds = ddsTxi_d, meta_col = "group", cond1 = "sed5M", cond2 = "exM", anno = anno_mm10)
+res_M_sed5_full$gene_id <- row.names(res_M_sed5_full)
+res_M_sed5_full <- left_join(as_tibble(res_M_sed5_full), as_tibble(anno_mm10), by = "gene_id")
+res_M_sed5_full
+  
+## Male PainFree vs Pain + Exercise 
+res_M_sed7_full <- get_res(dds = ddsTxi_d, meta_col = "group", cond1 = "sed7M", cond2 = "exM", anno = anno_mm10)
+res_M_sed7_full$gene_id <- row.names(res_M_sed7_full)
+res_M_sed7_full <- left_join(as_tibble(res_M_sed7_full), as_tibble(anno_mm10), by = "gene_id")
+res_M_sed7_full
+  
+## Male Pain vs Pain-Free
+res_M_sed5_sed7_full <- get_res(dds = ddsTxi_d, meta_col = "group", cond1 = "sed5M", cond2 = "sed7M", anno = anno_mm10)
+res_M_sed5_sed7_full$gene_id <- row.names(res_M_sed5_sed7_full)
+res_M_sed5_sed7_full <- left_join(as_tibble(res_M_sed5_sed7_full), as_tibble(anno_mm10), by = "gene_id")
+res_M_sed5_sed7_full
+  
+do_vol_plot(res_M_sed5_full, sig = 0.001, fc = 0.5, main = "Pain vs Exercise+Pain, Males Only")
+do_vol_plot(res_M_sed7_full, sig = 0.01, fc = 1.0, size = 3, main = "Pain-free vs Exercise+pain, Males Only")
+do_vol_plot(res_M_sed5_sed7_full, sig = 0.001, fc = 1.0, size = 4, main = "Pain vs Pain-Free, Males Only")
+
+```
+
+#### Female pairwise comparisons 
+
+```{r, get_grouped_res_F, dpi=200, fig.height=9,fig.width=9}
+
+## Female Pain vs Pain+Exercise
+res_F_sed5_full <- get_res(dds = ddsTxi_d, meta_col = "group", cond1 = "sed5F", cond2 = "exF", anno = anno_mm10)
+res_F_sed5_full$gene_id <- row.names(res_F_sed5_full)
+res_F_sed5_full <- left_join(as_tibble(res_F_sed5_full), as_tibble(anno_mm10), by = "gene_id")
+res_F_sed5_full
+
+
+## Female PainFree vs Pain+Exercise  
+res_F_sed7_full <- get_res(dds = ddsTxi_d, meta_col = "group", cond1 = "sed7F", cond2 = "exF", anno = anno_mm10)
+res_F_sed7_full$gene_id <- row.names(res_F_sed7_full)
+res_F_sed7_full <- left_join(as_tibble(res_F_sed7_full), as_tibble(anno_mm10), by = "gene_id")
+res_F_sed7_full
+  
+## Female Pain vs PainFree
+res_F_sed5_sed7_full <- get_res(dds = ddsTxi_d, meta_col = "group", cond1 = "sed5F", cond2 = "sed7F", anno = anno_mm10)
+res_F_sed5_sed7_full$gene_id <- row.names(res_F_sed5_sed7_full)
+res_F_sed5_sed7_full <- left_join(as_tibble(res_F_sed5_sed7_full), as_tibble(anno_mm10), by = "gene_id")
+res_F_sed5_sed7_full
+  
+do_vol_plot(res_F_sed5_full, sig = 0.01, fc = 0.5, size = 3, main = "Pain vs Exercise+Pain, Females Only, Red p_adj < 0.01")
+do_vol_plot(res_F_sed7_full, sig = 0.01, fc = 1.0, size = 3, main = "Pain-free vs Exercise+pain, Females Only, Red p_adj < 0.01")
+do_vol_plot(res_F_sed5_sed7_full, sig = 0.000001, fc = 1.5, size = 3, main = "Pain vs Pain-Free, Females Only, Red p_adj < 10e-6")
+
+```
+
+
+#### Venn analysis of M/F overlap in grouped analysis 
+
+There are no results in males for Pain vs Pain+Exercise so I omit that Venn Diagram. 
+
+```{r, VENN2}
+library(Vennerable)
+v <- Venn(list(PainFree_v_PainEx_Male = res_M_sed7_full$gene_id, 
+                           PainFree_v_PainEx_Female = res_F_sed7_full$gene_id))
+                           
+
+plot(v, doWeights = TRUE)
+
+# There are zero results for Males in pain vs pain+exercise.  
+#v2 <- Venn(list(Pain_v_PainEx_Male = res_M_sed5_full$gene_id, 
+                      #     Pain_v_PainEx_Female = res_F_sed5_full$gene_id))
+                           
+
+#plot(v2, doWeights = TRUE)
+
+v3 <- Venn(list(PainFree_vs_Pain_Male = res_M_sed5_sed7_full$gene_id,
+                           PainFree_vs_Pain_Female = res_F_sed5_sed7_full$gene_id))
+
+
+plot(v3, doWeights = TRUE)
+
+```
+
+```{r, write_csv, eval = FALSE, echo=FALSE}
+setwd('~/collab_proj/sluka/project_rnaseq_mouse_21_056_Jun2021/')
+
+## Separate DDS for males 
+get_res_iPG(ddsTxi_M, meta_col = "cond", "sed5", "ex", anno = anno_mm10)
+get_res_iPG(ddsTxi_M, meta_col = "cond", "sed7", "ex", anno = anno_mm10)
+get_res_iPG(ddsTxi_M, meta_col = "cond", "sed5", "sed7", anno = anno_mm10)
+
+## Separate DDS for females
+get_res_iPG(ddsTxi_F, meta_col = "cond", "sed5", "ex", anno = anno_mm10)
+get_res_iPG(ddsTxi_F, meta_col = "cond", "sed7", "ex", anno = anno_mm10)
+get_res_iPG(ddsTxi_F, meta_col = "cond", "sed5", "sed7", anno = anno_mm10)
+
+## Grouped DDS for males and females 
+get_res_iPG(ddsTxi_d, meta_col = "group", "sed5M", "exM", anno = anno_mm10)
+get_res_iPG(ddsTxi_d, meta_col = "group", "sed7M", "exM", anno = anno_mm10)
+get_res_iPG(ddsTxi_d, meta_col = "group", "sed5M", "sed7M", anno = anno_mm10)
+
+## Grouped DDS for males and females 
+get_res_iPG(ddsTxi_d, meta_col = "group", "sed5F", "exF", anno = anno_mm10)
+get_res_iPG(ddsTxi_d, meta_col = "group", "sed7F", "exF", anno = anno_mm10)
+get_res_iPG(ddsTxi_d, meta_col = "group", "sed5F", "sed7F", anno = anno_mm10)
+
+```
+
+
+#### Session Environment (For Internal Use)
+
+```{r, sesh}
+sessionInfo()
+```

@@ -1,0 +1,391 @@
+---
+title: "Exercise and pain induction in a mouse model of pain; RNA-seq of mouse gastrocnemius muscle"
+author: Michael Chimenti
+date:  06.15.21
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+knitr::opts_knit$set(root.dir = "~/collab_proj/sluka/project_rnaseq_mouse_21_056_Jun2021/")
+```
+
+## Introduction
+
+We have shown repeatedly that 8 weeks of exercise prior to induction of our pain model can prevent the onset of pain. We have shown that exercise can prevent pain through alterations at the muscle, dorsal root ganglia, and in the brain. However, we have only elucidated a few of these mechanisms and we wanted to use RNAseq to help us determine more possible mechanisms. The overall goal of this project is to determine how muscle pain alters the transcriptome in various tissue locations and how exercise alters the transcriptional response to the induction of chronic pain. First, we would like to compare transcriptional differences between pain free and in pain mice in order to determine how the transcriptome is altered after induction of the pain model. From our spreadsheet the pain free animals are listed as Sed + 7.2 and the in pain mice are listed as Sed + 5.0. Next, we would like to understand how 8 weeks of exercise performed prior to induction of the pain model alters the transcriptional response to prevent the onset of chronic pain. From our spreadsheet exercised animals are listed as Ex. Lastly, the pain model we use produces a sex dependent pain phenotype in which males and females demonstrate different severity of pain. Therefore, we would like to see if there are any differences in the transcriptome between males and females that could demonstrate differences in pain mechanisms or give us insight into what is driving the pain phenotype.
+
+- Sed_72 = pain free animals (no pain induction)
+- Sed_50 = "in pain" animals (pain induction)
+- Ex = 8 weeks exercise + pain induction 
+
+### Samples were prepared according to: 
+
+Illumina TruSeq mRNA_seq stranded 
+NovaSeq SP 200cycles (100PE)
+
+### Bcbio pipeline setup
+
+  - dirs:
+  -  config: /Dedicated/IIHG-argon/bcbio-1.2.4/galaxy
+  -  fastq: null
+  -  flowcell: null
+  -  galaxy: /Dedicated/IIHG-argon/bcbio-1.2.4/galaxy
+  -  work: /Shared/Bioinformatics/data/mchiment/sluka/project_rnaseq_mouse_21_056_Jun2021/to_merge-merged/work
+-  genome_build: mm10
+-  genome_resources:
+-    aliases:
+-      ensembl: mus_musculus_vep_99_GRCm38
+-      human: null
+-      snpeff: GRCm38.86
+-    rnaseq:
+-      dexseq: /Dedicated/IIHG-argon/bcbio-1.2.4/genomes/Mmusculus/mm10/rnaseq/ref-transcripts.dexseq.gff3
+-      gene_bed: /Dedicated/IIHG-argon/bcbio-1.2.4/genomes/Mmusculus/mm10/rnaseq/ref-transcripts.bed
+-      rRNA_fa: ../rnaseq/rRNA.fa
+-      transcripts: /Dedicated/IIHG-argon/bcbio-1.2.4/genomes/Mmusculus/mm10/rnaseq/ref-transcripts.gtf
+-      transcripts_mask: /Dedicated/IIHG-argon/bcbio-1.2.4/genomes/Mmusculus/mm10/rnaseq/ref-transcripts-mask.gtf
+
+### Methods 
+
+Here is a "generic" methods paragraph that captures pretty closely what we did: 
+
+*"Analysis was conducted by the Bioinformatics Division of the Iowa Institute of Human Genetics (IIHG).  Reads were processed with the ‘bcbio-nextgen.py’ open-source informatics pipeline developed primarily at Harvard Chan Bioinformatics (v.1.0.8) [32] running on the Argon HPC resource at the University of Iowa.  This pipeline includes ‘best practices’ approaches for read quality control, read alignment and quantitation.  The ‘bcbio-nextgen.py’ pipeline was run in “RNA-seq” mode with the ‘mm10’ key as the selected genome build (internally referencing Ensembl GRCm38.p6 v94, GENCODE M19).  The pipeline aligned reads to the GRCm38 genome using the splice-aware, ultra-rapid hisat2 aligner (2.1.0) [34,35] and concurrently quantified reads to the GENCODE M19 transcriptome using the ‘salmon’ (0.9.1) aligner [36].  Qualimap (2.2.2) [33], a computational tool that examines hisat2 BAM alignment files, was used to examine the read data for quality control. We observed > 80% of RNA-seq reads uniquely mapping to the reference and >80% of reads in exonic regions.  Sequence quality scores passed basic checks, and sequence duplication rates were within acceptable parameters.  Salmon-derived transcript quantifications (TPM) were imported and summarized to estimated counts at the gene level using tximport (1.12.3) in Rstudio [37], as described in the best-practices DESeq2 vignette (https://bioconductor.org/packages/release/bioc/vignettes/DESeq2/inst/doc/DESeq2.html).  Genes with fewer than 5 estimated counts across all samples were pre-filtered from downstream analysis, as per recommended procedure.  Differential gene expression analysis was conducted with DESeq2(1.24.0) on estimated gene-level counts [38].  An FDR of 5% and logFC of XY was set as a cutoff for differential expression (DEGs)."*
+
+### R packages we will use in this analysis
+
+```{r, imports, warnings=FALSE, message=FALSE, eval=TRUE}
+#negative binomial GLM and related
+library('DESeq2')
+library('calibrate')
+library('tximport')
+library('readr')
+#annotation
+library('biomaRt')
+library("AnnotationDbi")
+library("org.Mm.eg.db")
+#Exploratory analysis
+library('tidyverse')
+library('pcaExplorer')
+library('ggrepel')
+#pathway and gene clusters
+library('DEGreport')
+library('cowplot')
+
+
+setwd("~/collab_proj/sluka/project_rnaseq_mouse_21_056_Jun2021/")
+
+```
+
+```{r, function_defs, eval=TRUE, echo=FALSE}
+
+## Volcano Plot
+do_vol_plot <- function(df, sig=0.05, fc=0.5, size = 4){
+  
+  df_sig<- df %>% filter(padj < sig)
+  
+  ## genes with labels -- signficant,decreased expression and start with IGF
+  
+  df_label<- df %>% 
+              filter(padj < sig, abs(log2FoldChange) > fc)
+              #mutate(short_id = stringr::str_split(gene_id, "000000") %>% map_chr(.,2))
+  
+  
+  ## plot
+  
+  p <- ggplot(df, aes(log2FoldChange, -log10(padj)))  +
+      geom_point(size=0.8, color="black", alpha=.8) + 
+      geom_point(size=0.8, data=df_sig, aes(log2FoldChange, -log10(padj)), colour="red") +
+       geom_text_repel(size= size, 
+                    colour="black",
+                    segment.size=0.1, 
+                    nudge_x=0.06, 
+                    nudge_y=0.06, 
+                    data=df_label,
+                    aes(log2FoldChange, -log10(padj), label=gene_name), 
+                    max.iter= 200, 
+                    point.padding = 0.15, 
+                    segment.alpha = 1, 
+                    box.padding=.15,
+                    min.segment.length = unit(0.15, 'lines'),size=2.5) +
+    theme(
+      axis.text.x = element_text(size=12),
+      axis.text.y = element_text(size=12),
+      axis.title.x = element_text(size=14, margin = margin(t = 10, r = 0, b = 10, l = 0)),
+      axis.title.y = element_text(size=14, margin = margin(t = 0, r = 10, b = 0, l = 10)),
+      plot.margin =unit(c(.5,.5,.5,.5),"cm"),
+      plot.title = element_text(size = 11)
+    )
+  
+  return (p)
+}
+
+get_res_tib_anno <- function(dds, meta_col, cond1, cond2, anno, pval = 0.05){
+ res <- results(dds, contrast = c(meta_col,cond1,cond2))
+ res <- na.omit(res)
+ res_sig <- res[res$padj < pval & res$baseMean > 5.0,]
+ res_ord <- res_sig[order(res_sig$padj),]
+ res_ord$ENSEMBL <- row.names(res_ord)
+ res_ord <- left_join(as_tibble(res_ord), as_tibble(anno), by = "ENSEMBL")
+ return(res_ord)
+}
+
+#function to quickly get sorted results 
+get_res <- function(dds, meta_col, cond1, cond2, anno, pval = 0.05){
+  res <- results(dds, contrast = c(meta_col,cond1,cond2))
+  res <- na.omit(res)
+  res_sig <- res[res$padj < pval,]
+  res_ord <- res_sig[order(res_sig$padj),]
+  return(res_ord)
+}
+
+get_res_iPG <- function(dds, meta_col, cond1, cond2, anno, pval = 0.05){
+  res <- results(dds, contrast = c(meta_col,cond1,cond2))
+  res <- na.omit(res)
+  res <- res[abs(res$log2FoldChange) < 10, ]
+  res$gene_id <- row.names(res)
+  res <- left_join(as_tibble(res), as_tibble(anno), by = "gene_id")
+  write.table(res, file = "res_for_iPath.txt", sep = '\t', 
+              row.names=FALSE)}
+
+
+
+```
+
+
+### Importing the data and converting to counts for DESeq2
+
+We are using the transcriptome quantification from pseudo-alignment here even though we also did full alignment (for QC purposes) owing to the fact that this provides more accurate quantification at the gene level and accounts for differential isoform usage as per: 
+
+**Soneson C, Love MI, Robinson MD. Differential analyses for RNA-seq: transcript-level estimates improve gene-level inferences. F1000Res. 2015;4:1521. Published 2015 Dec 30.** doi:10.12688/f1000research.7563.2
+
+In which the authors write: 
+
+*"In this paper, we show that gene-level abundance estimates and statistical inference offer advantages over transcript-level analyses, in terms of performance and interpretability. We also illustrate that the presence of differential isoform usage can lead to inflated false discovery rates in differential gene expression analyses on simple count matrices but that this can be addressed by incorporating offsets derived from transcript-level abundance estimates. We also show that the problem is relatively minor in several real data sets. Finally, we provide an R package ( tximport) to help users integrate transcript-level abundance estimates from common quantification pipelines into count-based statistical inference engines."*
+
+The metadata table looks like this: 
+```{r, import_meta}
+samples <- read.table("samples.csv", sep=',', header=TRUE)
+head(samples, 10)
+```
+
+### Importing salmon TPMs and creating DESeq2 object 
+
+```{r, import_salmon}
+
+rownames(samples) <- samples$sample
+#samples$batch <- as.factor(samples$batch)
+
+#samples %>% kable() %>% kable_styling()
+
+files <- file.path(getwd(), samples$sample, 'salmon', 'quant.sf')
+names(files) <- samples$sample
+
+tx2gene <- read_csv(file.path(getwd(), "tx2gene.csv"), col_names = FALSE)
+
+txi <- tximport(files, type="salmon", tx2gene=tx2gene)
+
+ddsTxi <- DESeqDataSetFromTximport(txi,
+                                   colData = samples,
+                                   design = ~ sex + tissue_batch + cond)
+
+#ddsTxi <- ddsTxi[ rowSums(counts(ddsTxi)) > 10, ]   #row Sum filter
+ddsTxi2 <- ddsTxi[ rowSums(counts(ddsTxi) > 10) >= 15, ]  #at least 5 counts at 15 or more samples
+ddsTxi2 <- DESeq(ddsTxi2)
+
+```
+### Principal components analysis 
+
+```{r, pca}
+anno_mm10 <- readRDS('~/Desktop/anno_mm10.rds')
+vstTxi <- vst(ddsTxi2, blind=FALSE)
+colnames(vstTxi) <- vstTxi$sample
+```
+
+Finally, we'll look at the PCA plot:
+
+
+```{r, PCA_explorer_1, echo=FALSE, dpi = 200, fig.height=5, fig.width=9}
+p <- pcaExplorer::pcaplot(vstTxi, intgroup = c("cond"), ellipse = FALSE, text_labels = TRUE, point_size = 4, ntop=500, pcX = 1, pcY = 2)
+p <- p + ggtitle("PCA analysis of 21-056 sampleset; color by treatment")
+show(p)
+
+p <- pcaExplorer::pcaplot(vstTxi, intgroup = "sex", ellipse = FALSE, text_labels = TRUE, point_size = 4, ntop=500, pcX = 1, pcY = 2)
+p <- p + ggtitle("PCA analysis of 21-056 sampleset; color by sex")
+show(p)
+```
+
+### Sample-to-sample distance heatmap
+
+```{r, sampleDists, echo=FALSE, dpi=200, fig.width=9,fig.height=9}
+library(RColorBrewer)
+library(pheatmap)
+sampleDists <- dist(t(assay(vstTxi)))
+sampleDistMatrix <- as.matrix(sampleDists)
+rownames(sampleDistMatrix) <- vstTxi$sample
+colnames(sampleDistMatrix) <- vstTxi$sample
+colors <- colorRampPalette( rev(brewer.pal(9, "Blues")) )(255)
+
+cond <- colData(vstTxi)[,2:4]
+anno_col <- as.data.frame(cond, row.names = as.character(vstTxi$sample))
+pheatmap(sampleDistMatrix,
+         annotation_col = anno_col,
+         clustering_distance_rows=sampleDists,
+         clustering_distance_cols=sampleDists,
+         colors = colors,
+         annotation_row = anno_col)
+```
+
+Suspected outliers: High likelihood: GM_45, GM_39, 
+Second tier (low likelihood): GM_13, GM_5, GM_14.  
+
+****** NANO RESULTS FOR GM45*******
+- Overall Results for sample 8 : GM45
+- RNA Area: 963.6
+- RNA Concentration: 226 ng/µl
+- rRNA Ratio [28s / 18s]: 6.4
+- RNA Integrity Number (RIN): N/A (B.02.10)
+- Result Flagging Color:
+- Result Flagging Label: RIN N/A
+- Fragment table for sample 8 : GM45
+- Name Start Time [s] End Time [s] Area % of total Area
+- 18S 42.08 43.66 39.1 4.1
+- 28S 46.39 52.42 251.8 26.1
+
+**********
+
+**On the basis of this really bad QC result, I would suggest excluding GM_45 from the experiment.**  
+
+**Another question:  Are GM-39 and GM-45 really female?  They segregate with the male samples along PC2 but are labeled female.  Let's find out:** 
+
+```{r, plotCountsXist}
+
+plotCounts(ddsTxi, gene="ENSMUSG00000086503", intgroup = c("sex"))
+p <- plotCounts(ddsTxi, gene="ENSMUSG00000086503", intgroup = c("sex"), returnData = TRUE)
+p
+```
+
+No, GM-39 and GM-45 are female.  They boh have high Xist expression.  Something else is causing it them to segregate strangely along PC2.  
+
+#### Robust PCA outlier analysis using PCAGrid algorithm 
+
+**rPCA implemented in the PcaGrid function is an accurate and objective method to detect outlier samples. It is well suited for high-dimensional data with small sample sizes like RNA-seq data. Outlier removal can significantly improve the performance of differential gene detection and downstream functional analysis.**
+
+https://bmcbioinformatics.biomedcentral.com/articles/10.1186/s12859-020-03608-0
+
+```{r, rrcov, warning=FALSE, message=FALSE, echo = FALSE}
+library(rrcov)
+rlTxi <- rlog(ddsTxi2)
+mat <- assay(rlTxi)
+pcaG <- rrcov::PcaGrid(t(mat), k=2, method = "mad", maxiter = 10, splitcircle = 25, scores = TRUE, zero.tol = 1e-16, crit.pca.distances = 0.98)
+which(pcaG@flag=='FALSE')
+pcaH <- rrcov::PcaHubert(t(mat), k=2)
+
+
+plot(pcaG, main="Robust PCA Grid")
+plot(pcaH, main="Robust PCA Hubert")
+```
+
+GM_45 is definitely an outlier by robust PCA analysis (large score and orthogonal distance).  GM10, GM16, and GM39 are also likely outliers.  
+
+Because GM39 is from the same set of factor levels as GM45, we will keep it for now.  
+
+### Dropping outlier
+
+```{r, drop_outs, message=FALSE}
+ddsTxi_d <- ddsTxi2[,ddsTxi2$sample!="GM_45"]
+design(ddsTxi_d) <- formula(~sex + tissue_batch + cond)
+ddsTxi_d <- DESeq(ddsTxi_d)
+```
+
+### DE testing 
+
+- Sed_72 = pain free animals (no pain induction)
+- Sed_50 = "in pain" animals (pain induction)
+- Ex = 8 weeks exercise + pain induction 
+
+**We are interested in pain vs pain+exercise, no-pain vs pain+exercise, and pain vs no-pain. **
+
+- res_sed5_ex = in pain vs exercise + in pain
+- res_sed7_ex = no pain vs exercise + in pain 
+- res_sed5_sed7 = in pain vs no pain 
+
+First, we will compute the DEGs and look at the top 9 (or fewer possibly) DEG counts for each contrast: 
+
+#### Sed_5 vs Exercise 
+
+```{r, sed5, dpi=200, fig.height=9,fig.width=9}
+
+res_sed5 <- get_res(ddsTxi_d, meta_col = "cond", cond1 = "sed5", cond2 = "ex", anno = anno_mm10)
+DEGreport::degPlot(dds=ddsTxi_d, xs="cond", group ="sex", res = res_sed5, n = 5)
+res_sed5$gene_id <- row.names(res_sed5)
+res_sed5_ex <- left_join(as_tibble(res_sed5), as_tibble(anno_mm10), by = "gene_id")
+
+```
+
+#### Sed7 vs Exercise 
+```{r, sed7, dpi=200, fig.height=9,fig.width=9}
+res_sed7 <- get_res(ddsTxi_d, meta_col = "cond", cond1 = "sed7", cond2 = "ex", anno = anno_mm10)
+DEGreport::degPlot(dds=ddsTxi_d, xs="cond", group ="sex", res = res_sed7, n = 9)
+res_sed7$gene_id <- row.names(res_sed7)
+res_sed7_ex <- left_join(as_tibble(res_sed7), as_tibble(anno_mm10), by = "gene_id")
+
+```
+
+#### Sed5 vs Sed7
+```{r, sed5_v_sed7, dpi=200, fig.height=9,fig.width=9}
+res_sed5_sed7 <- get_res(ddsTxi_d, meta_col = "cond", cond1 = "sed5", cond2 = "sed7", anno = anno_mm10)
+DEGreport::degPlot(dds=ddsTxi_d, xs="cond", group ="sex", res = res_sed5_sed7, n = 9)
+res_sed5_sed7$gene_id <- row.names(res_sed5_sed7)
+res_sed5_sed7 <- left_join(as_tibble(res_sed5_sed7), as_tibble(anno_mm10), by = "gene_id")
+```
+
+
+### Top DEGs for each contrast 
+
+#### Pain vs pain + exercise 
+```{r, tables1}
+library(kableExtra)
+
+## pain vs pain + exercise 
+res_sed5_ex %>% kable() %>% kable_styling()
+```
+
+#### Pain free vs pain + exercise 
+```{r, tables2}
+## pain-free vs pain + exercise 
+head(res_sed7_ex, 50) %>% kable() %>% kable_styling()
+```
+
+#### Pain vs Pain-free
+```{r, tables3}
+## pain vs pain-free
+head(res_sed5_sed7, 50) %>% kable() %>% kable_styling()
+```
+
+### Volcano plots 
+
+
+```{r, vol_plots, dpi=200, fig.height=9, fig.width=9, warning=FALSE}
+p1 <- do_vol_plot(res_sed5_ex)
+p1 <- p1 + ggtitle("Pain mouse vs exercise plus pain")
+p1
+
+```
+
+```{r, vol_plots2, dpi=200, fig.height=9, fig.width=9, warning=FALSE}
+p2 <- do_vol_plot(res_sed7_ex, sig = 0.001, fc = 1.0, size = 3)
+p2 <- p2 + ggtitle("Pain-free mouse vs exercise plus pain")
+p2
+```
+
+```{r, vol_plots3, dpi=200, fig.height=9, fig.width=9, warning=FALSE}
+p3  <- do_vol_plot(res_sed5_sed7, sig = 0.00001, fc = 2, size =3)
+p3 <- p3 + ggtitle("Pain vs pain-free")
+p3
+```
+
+
+```{r, sesh}
+sessionInfo()
+```
